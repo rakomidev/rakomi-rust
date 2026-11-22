@@ -1,0 +1,171 @@
+name: Publish to crates.io
+
+# Runs on a tag v<version>. Publishes `rakomi`, waits until the crates.io index serves it, then publishes
+# `rakomi-sdk`, which depends on it.
+#
+# Two modes, chosen by the repository variable CRATES_FIRST_PUBLISH and nothing else:
+#   "true"        first publish: the crates do not exist on crates.io yet, so trusted publishing cannot be
+#                 configured for them. The token comes from the `release` environment secret
+#                 CARGO_REGISTRY_TOKEN.
+#   unset/"false" trusted publishing: a short-lived token from the GitHub OIDC id-token via
+#                 rust-lang/crates-io-auth-action. The environment secret CARGO_REGISTRY_TOKEN must be
+#                 deleted; the run fails while it exists.
+# Any other value fails the run. Neither mode falls back to the other.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install the stable toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - name: The tag names the version of both crates
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          META="$(cargo metadata --no-deps --format-version 1 --locked)"
+          for CRATE in rakomi rakomi-sdk; do
+            V="$(jq -r --arg n "${CRATE}" '.packages[] | select(.name == $n) | .version' <<<"${META}")"
+            if [ "${V}" != "${VERSION}" ]; then
+              echo "ERROR: ${CRATE} is at version '${V}', the tag names '${VERSION}'"
+              exit 1
+            fi
+          done
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Package dry run of both crates
+        run: cargo publish --dry-run --locked --workspace
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Select the publish mode
+        id: mode
+        env:
+          CRATES_FIRST_PUBLISH: ${{ vars.CRATES_FIRST_PUBLISH }}
+          HAS_FIRST_PUBLISH_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          case "${CRATES_FIRST_PUBLISH}" in
+            true)
+              if [ "${HAS_FIRST_PUBLISH_TOKEN}" != "true" ]; then
+                echo "ERROR: CRATES_FIRST_PUBLISH=true but the release environment has no CARGO_REGISTRY_TOKEN"
+                exit 1
+              fi
+              MODE=first-publish-token
+              ;;
+            "" | false)
+              if [ "${HAS_FIRST_PUBLISH_TOKEN}" = "true" ]; then
+                echo "ERROR: trusted publishing selected but the release environment still holds CARGO_REGISTRY_TOKEN; delete it"
+                exit 1
+              fi
+              MODE=trusted-publishing
+              ;;
+            *)
+              echo "ERROR: CRATES_FIRST_PUBLISH must be 'true', 'false' or unset, not '${CRATES_FIRST_PUBLISH}'"
+              exit 1
+              ;;
+          esac
+          echo "publish mode: ${MODE}"
+          echo "mode=${MODE}" >> "${GITHUB_OUTPUT}"
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install the stable toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Get a crates.io token by trusted publishing
+        id: auth
+        if: steps.mode.outputs.mode == 'trusted-publishing'
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+
+      - name: Publish rakomi, then rakomi-sdk
+        env:
+          MODE: ${{ steps.mode.outputs.mode }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          TRUSTED_TOKEN: ${{ steps.auth.outputs.token }}
+          FIRST_PUBLISH_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          case "${MODE}" in
+            trusted-publishing) TOKEN="${TRUSTED_TOKEN}" ;;
+            first-publish-token) TOKEN="${FIRST_PUBLISH_TOKEN}" ;;
+            *) echo "ERROR: unknown publish mode '${MODE}'"; exit 1 ;;
+          esac
+          if [ -z "${TOKEN}" ]; then
+            echo "ERROR: no crates.io token for mode ${MODE}"
+            exit 1
+          fi
+          unset TRUSTED_TOKEN FIRST_PUBLISH_TOKEN
+
+          # The sparse-index path of a crate name of four or more characters: first two, next two, name.
+          indexed() {
+            local NAME="$1" BODY
+            BODY="$(curl -fsS "https://index.crates.io/${NAME:0:2}/${NAME:2:2}/${NAME}")" || return 1
+            jq -e --arg v "${VERSION}" 'select(.vers == $v)' <<<"${BODY}" >/dev/null
+          }
+
+          for CRATE in rakomi rakomi-sdk; do
+            if indexed "${CRATE}"; then
+              echo "${CRATE} ${VERSION} is already on crates.io; not publishing it again"
+            else
+              CARGO_REGISTRY_TOKEN="${TOKEN}" cargo publish --locked --no-verify -p "${CRATE}"
+            fi
+            for _ in $(seq 1 60); do
+              if indexed "${CRATE}"; then
+                echo "${CRATE} ${VERSION} is in the crates.io index"
+                continue 2
+              fi
+              sleep 10
+            done
+            echo "ERROR: ${CRATE} ${VERSION} did not appear in the crates.io index within 10 minutes"
+            exit 1
+          done

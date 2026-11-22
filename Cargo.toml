@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["crates/rakomi", "crates/rakomi-sdk"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+authors = ["CRE8EVE Sp. z o.o."]
+repository = "https://github.com/rakomidev/rakomi-rust"
+homepage = "https://rakomi.com"
