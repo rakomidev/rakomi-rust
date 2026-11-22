@@ -1,0 +1,18 @@
+[package]
+name = "rakomi"
+description = "OpenID Connect discovery and JWKS retrieval for Rakomi and other OpenID providers"
+readme = "README.md"
+keywords = ["openid", "oidc", "oauth", "discovery", "jwks"]
+categories = ["authentication", "web-programming::http-client"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+ureq = { version = "3.1", default-features = false, features = ["rustls"] }

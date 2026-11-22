@@ -1,0 +1,16 @@
+[package]
+name = "rakomi-sdk"
+description = "Rakomi SDK for Rust; currently re-exports the rakomi crate"
+readme = "README.md"
+keywords = ["openid", "oidc", "oauth", "rakomi"]
+categories = ["authentication"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+rakomi = { path = "../rakomi", version = "=0.1.0" }
