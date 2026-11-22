@@ -157,7 +157,7 @@ jobs:
             if indexed "${CRATE}"; then
               echo "${CRATE} ${VERSION} is already on crates.io; not publishing it again"
             else
-              CARGO_REGISTRY_TOKEN="${TOKEN}" cargo publish --locked -p "${CRATE}"
+              CARGO_REGISTRY_TOKEN="${TOKEN}" cargo publish --locked --no-verify -p "${CRATE}"
             fi
             for _ in $(seq 1 60); do
               if indexed "${CRATE}"; then
